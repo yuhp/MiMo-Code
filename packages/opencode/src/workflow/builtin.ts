@@ -12,6 +12,8 @@ export * as BuiltinWorkflow from "./builtin"
 // @ts-expect-error TS1192: import-attribute text loader, resolved by Bun not tsgo
 import DEEP_RESEARCH_SCRIPT from "./builtin/deep-research.js" with { type: "text" }
 // @ts-expect-error TS1192: import-attribute text loader, resolved by Bun not tsgo
+import FACT_CHECK_SCRIPT from "./builtin/fact-check.js" with { type: "text" }
+// @ts-expect-error TS1192: import-attribute text loader, resolved by Bun not tsgo
 import COMPOSE_SCRIPT from "./builtin/compose.js" with { type: "text" }
 import { parseMeta } from "./meta"
 
@@ -30,6 +32,7 @@ export type Entry = {
 // tells the user which one.
 const SCRIPTS: { file: string; script: string }[] = [
   { file: "deep-research.js", script: DEEP_RESEARCH_SCRIPT },
+  { file: "fact-check.js", script: FACT_CHECK_SCRIPT },
   { file: "compose.js", script: COMPOSE_SCRIPT },
 ]
 
