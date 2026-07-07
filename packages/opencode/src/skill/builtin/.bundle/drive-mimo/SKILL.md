@@ -45,6 +45,11 @@ which bun || echo "bun not found — needed for dev mode"
 which tmux || echo "tmux not found — install it for TUI mode"
 ```
 
+> **Running the `wait-for-text.sh` helper:** invoke it as
+> `bash scripts/wait-for-text.sh …` from this skill's directory. The extracted
+> copy is not marked executable, so calling it directly (`scripts/wait-for-text.sh`)
+> would fail with "Permission denied" — always prefix with `bash`.
+
 ---
 
 ## Dev Mode (debugging mimocode itself)
@@ -117,36 +122,56 @@ EXIT=$?
 
 ### JSON event types
 
+`--format json` writes one JSON object per line. **Every** event has the shape
+`{"type": ..., "timestamp": <ms>, "sessionID": "ses_...", ...payload}` — the
+`sessionID` is a field on each event, not a standalone event. The payload for
+most events is nested under `part`.
+
+Emitted event types (from the run event stream):
+
 ```
-{"type":"session.id","session":{"id":"ses_abc"}}
-{"type":"text","text":"I'll create the file..."}
-{"type":"reasoning","reasoning":"The user wants..."}
-{"type":"tool_use","tool":{"name":"write","input":{...}}}
-{"type":"tool_result","tool":{"name":"write","output":"..."}}
-{"type":"error","error":"Permission denied"}
-{"type":"session.status","status":{"type":"idle"}}
+{"type":"step_start","timestamp":...,"sessionID":"ses_abc","part":{...}}
+{"type":"text","timestamp":...,"sessionID":"ses_abc","part":{"type":"text","text":"I'll create the file...","time":{...}}}
+{"type":"reasoning","timestamp":...,"sessionID":"ses_abc","part":{"type":"reasoning","text":"The user wants..."}}
+{"type":"tool_use","timestamp":...,"sessionID":"ses_abc","part":{"type":"tool","tool":"write","state":{"status":"completed",...}}}
+{"type":"step_finish","timestamp":...,"sessionID":"ses_abc","part":{...}}
+{"type":"error","timestamp":...,"sessionID":"ses_abc","error":{...}}
 ```
 
-`session.status` with `type: "idle"` = completion signal.
+Notes that matter for parsing:
+
+- **No `session.id`, no `tool_result`, no `session.status` event.** A `tool_use`
+  is emitted **once** per tool part when it reaches `completed` or `error` — the
+  result/output is inside `part.state`, there is no separate result event.
+- **`tool_use` identifies the tool via `part.tool`** (a bare string, e.g.
+  `"tool":"write"`) — there is no `.tool.name` and no top-level `.name`.
+- **`text` / `reasoning` text lives at `part.text`**, not top-level `.text`.
+- **`reasoning` is only emitted when `--thinking` is passed.** Without it, no
+  reasoning events appear.
+- **Completion is not a stream event.** The process finishes when the run
+  completes; the reliable completion signal is **process exit** (exit code 0),
+  not any line in the JSONL.
 
 ### Validation patterns
 
 ```bash
-# Exit code
+# Completion — the real signal is the exit code, not a stream event
 [ $EXIT -eq 0 ] || echo "FAIL: exit $EXIT"
 
 # No errors
 grep -q '"type":"error"' /tmp/mimo-out.jsonl && echo "FAIL: errors found"
 
-# Reached completion
-grep -q '"session.status"' /tmp/mimo-out.jsonl || echo "FAIL: never completed"
+# A specific tool was used (match part.tool, the bare string)
+grep -q '"tool":"write"' /tmp/mimo-out.jsonl || echo "FAIL: write tool not called"
 
-# Tool was used
-grep -q '"name":"write"' /tmp/mimo-out.jsonl || echo "FAIL: write tool not called"
+# Text output contains expected string (text is at .part.text)
+grep '"type":"text"' /tmp/mimo-out.jsonl | jq -r '.part.text' | grep -q "expected"
 
-# Text output contains expected string
-grep '"type":"text"' /tmp/mimo-out.jsonl | jq -r '.text' | grep -q "expected"
+# Robust tool check via jq (works regardless of key ordering)
+jq -e 'select(.type=="tool_use") | .part.tool=="write"' /tmp/mimo-out.jsonl >/dev/null \
+  || echo "FAIL: write tool not called"
 ```
+
 
 ### Timeout
 
@@ -180,7 +205,7 @@ tmux new-session -d -s "$SESSION" -x 120 -y 30 \
   "MIMOCODE_HOME=$MHOME MIMOCODE_PURE=true mimo $WORKSPACE; sleep 999"
 
 # Wait for the TUI to render its input prompt
-scripts/wait-for-text.sh -t "$SESSION:0.0" -p "$PROMPT_RE" -T 15
+bash scripts/wait-for-text.sh -t "$SESSION:0.0" -p "$PROMPT_RE" -T 15
 ```
 
 Where `PROMPT_RE` is a language-neutral pattern for the input prompt. The
@@ -230,26 +255,26 @@ tmux capture-pane -t "$SESSION:0.0" -p -S -50
 
 ```bash
 # Wait for agent to start processing
-scripts/wait-for-text.sh -t "$SESSION:0.0" -p "thinking\|reading\|writing" -T 30
+bash scripts/wait-for-text.sh -t "$SESSION:0.0" -p "thinking\|reading\|writing" -T 30
 
 # Wait for tool permission prompt
-scripts/wait-for-text.sh -t "$SESSION:0.0" -p "Allow\|Deny\|permission\|approve" -T 30
+bash scripts/wait-for-text.sh -t "$SESSION:0.0" -p "Allow\|Deny\|permission\|approve" -T 30
 
 # Wait for completion
-scripts/wait-for-text.sh -t "$SESSION:0.0" -p "completed\|done\|finished\|idle" -T 120
+bash scripts/wait-for-text.sh -t "$SESSION:0.0" -p "completed\|done\|finished\|idle" -T 120
 
 # Wait for error
-scripts/wait-for-text.sh -t "$SESSION:0.0" -p "error\|failed\|Error" -T 30
+bash scripts/wait-for-text.sh -t "$SESSION:0.0" -p "error\|failed\|Error" -T 30
 
 # Custom regex
-scripts/wait-for-text.sh -t "$SESSION:0.0" -p "hello\.txt.*world" -T 30
+bash scripts/wait-for-text.sh -t "$SESSION:0.0" -p "hello\.txt.*world" -T 30
 ```
 
 ### Handle permission dialogs
 
 ```bash
 # Wait for permission prompt, then approve
-scripts/wait-for-text.sh -t "$SESSION:0.0" -p "Allow\|approve" -T 30
+bash scripts/wait-for-text.sh -t "$SESSION:0.0" -p "Allow\|approve" -T 30
 tmux send-keys -t "$SESSION:0.0" -l -- "y"
 tmux send-keys -t "$SESSION:0.0" Enter
 
@@ -264,12 +289,12 @@ tmux send-keys -t "$SESSION:0.0" Enter
 # Turn 1: send initial message
 tmux send-keys -t "$SESSION:0.0" -l -- "Create a TypeScript file that adds two numbers"
 tmux send-keys -t "$SESSION:0.0" Enter
-scripts/wait-for-text.sh -t "$SESSION:0.0" -p "completed\|done" -T 120
+bash scripts/wait-for-text.sh -t "$SESSION:0.0" -p "completed\|done" -T 120
 
 # Turn 2: follow-up
 tmux send-keys -t "$SESSION:0.0" -l -- "Now add a test for it"
 tmux send-keys -t "$SESSION:0.0" Enter
-scripts/wait-for-text.sh -t "$SESSION:0.0" -p "completed\|done" -T 120
+bash scripts/wait-for-text.sh -t "$SESSION:0.0" -p "completed\|done" -T 120
 
 # Verify result
 tmux capture-pane -t "$SESSION:0.0" -p -S - | grep -i "pass\|fail"
@@ -311,7 +336,7 @@ test_tool_use() {
   local E=$?
   local OK=true
   [ $E -ne 0 ] && OK=false
-  ! grep -q '"name":"write"' /tmp/s2.jsonl && OK=false
+  ! grep -q '"tool":"write"' /tmp/s2.jsonl && OK=false
   [ ! -f "$WS/test.txt" ] && OK=false
   rm -rf "$MHOME" "$WS" "$P"
   $OK && echo "PASS" || echo "FAIL"
@@ -327,14 +352,14 @@ test_tui_interactive() {
   tmux new-session -d -s "$SID" -x 120 -y 30 "MIMOCODE_HOME=$MHOME MIMOCODE_PURE=true mimo $WS; sleep 999"
 
   # Wait for prompt
-  scripts/wait-for-text.sh -t "$SID:0.0" -p "$PROMPT_RE" -T 15 || { echo "FAIL: no prompt"; tmux kill-session -t $SID; return 1; }
+  bash scripts/wait-for-text.sh -t "$SID:0.0" -p "$PROMPT_RE" -T 15 || { echo "FAIL: no prompt"; tmux kill-session -t $SID; return 1; }
 
   # Send task
   tmux send-keys -t "$SID:0.0" -l -- "Create hello.txt with content 'world'"
   tmux send-keys -t "$SID:0.0" Enter
 
   # Wait for completion (agent shows elapsed time like "· 9.8s")
-  scripts/wait-for-text.sh -t "$SID:0.0" -p "· [0-9]" -T 120 || { echo "FAIL: no completion"; tmux kill-session -t $SID; return 1; }
+  bash scripts/wait-for-text.sh -t "$SID:0.0" -p "· [0-9]" -T 120 || { echo "FAIL: no completion"; tmux kill-session -t $SID; return 1; }
 
   # Verify file
   [ -f "$WS/hello.txt" ] && echo "PASS" || echo "FAIL"
@@ -351,21 +376,21 @@ test_tui_permission() {
   local PROMPT_RE='>|Ask|/[a-z]'
   tmux new-session -d -s "$SID" -x 120 -y 30 "MIMOCODE_HOME=$MHOME MIMOCODE_PURE=true mimo $WS; sleep 999"
 
-  scripts/wait-for-text.sh -t "$SID:0.0" -p "$PROMPT_RE" -T 15
+  bash scripts/wait-for-text.sh -t "$SID:0.0" -p "$PROMPT_RE" -T 15
 
   # Ask for something that needs permission (no --dangerously-skip-permissions in TUI)
   tmux send-keys -t "$SID:0.0" -l -- "Run the command: echo hello"
   tmux send-keys -t "$SID:0.0" Enter
 
   # Wait for permission prompt
-  scripts/wait-for-text.sh -t "$SID:0.0" -p "Allow\|approve\|permission\|y/n" -T 30 || { echo "FAIL: no permission prompt"; tmux kill-session -t $SID; return 1; }
+  bash scripts/wait-for-text.sh -t "$SID:0.0" -p "Allow\|approve\|permission\|y/n" -T 30 || { echo "FAIL: no permission prompt"; tmux kill-session -t $SID; return 1; }
 
   # Approve
   tmux send-keys -t "$SID:0.0" -l -- "y"
   tmux send-keys -t "$SID:0.0" Enter
 
   # Wait for completion
-  scripts/wait-for-text.sh -t "$SID:0.0" -p "· [0-9]" -T 60
+  bash scripts/wait-for-text.sh -t "$SID:0.0" -p "· [0-9]" -T 60
 
   tmux capture-pane -t "$SID:0.0" -p | grep -q "hello" && echo "PASS" || echo "FAIL"
   tmux kill-session -t "$SID" 2>/dev/null
@@ -381,7 +406,7 @@ test_tui_keybindings() {
   local PROMPT_RE='>|Ask|/[a-z]'
   tmux new-session -d -s "$SID" -x 120 -y 30 "MIMOCODE_HOME=$MHOME MIMOCODE_PURE=true mimo $WS; sleep 999"
 
-  scripts/wait-for-text.sh -t "$SID:0.0" -p "$PROMPT_RE" -T 15
+  bash scripts/wait-for-text.sh -t "$SID:0.0" -p "$PROMPT_RE" -T 15
 
   # Test Ctrl+C cancels input
   tmux send-keys -t "$SID:0.0" -l -- "some partial input"
@@ -427,7 +452,7 @@ run_all() {
 | TUI launch | `tmux new-session -d -s test -x 120 -y 30 "MIMOCODE_HOME=$(mktemp -d) mimo $WORKSPACE; sleep 999"` |
 | Send text | `tmux send-keys -t test:0.0 -l -- "text" && tmux send-keys -t test:0.0 Enter` |
 | Capture screen | `tmux capture-pane -t test:0.0 -p -S -` |
-| Wait for text | `scripts/wait-for-text.sh -t test:0.0 -p "pattern" -T 30` |
+| Wait for text | `bash scripts/wait-for-text.sh -t test:0.0 -p "pattern" -T 30` |
 | Send Ctrl+C | `tmux send-keys -t test:0.0 C-c` |
 | Approve permission | `tmux send-keys -t test:0.0 -l -- "y" && tmux send-keys -t test:0.0 Enter` |
 | Cleanup | `tmux kill-session -t test && rm -rf $MHOME` |
