@@ -98,6 +98,10 @@ const InfoSchema = Schema.Struct({
     description: "JSON schema reference for configuration validation",
   }),
   logLevel: Schema.optional(LogLevelRef).annotate({ description: "Log level" }),
+  env: Schema.optional(Schema.Record(Schema.String, Schema.String)).annotate({
+    description:
+      "Environment variables to inject into the mimocode process and its child processes (e.g. the bash tool). Values override existing same-named process environment variables. Supports {env:VAR} and {file:path} substitution.",
+  }),
   server: Schema.optional(ConfigServer.Server).annotate({
     description: "Server configuration for mimo serve and web commands",
   }),
@@ -962,6 +966,13 @@ export const layer = Layer.effect(
         }
         if (Flag.MIMOCODE_DISABLE_PRUNE) {
           result.compaction = { ...result.compaction, prune: false }
+        }
+
+        if (result.env) {
+          for (const [key, value] of Object.entries(result.env)) {
+            process.env[key] = value
+            yield* env.set(key, value)
+          }
         }
 
         return {
