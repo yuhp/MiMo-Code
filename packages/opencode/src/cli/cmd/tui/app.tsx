@@ -608,8 +608,7 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
         name: "skip-permissions",
       },
       onSelect: () => {
-        const next = !local.skipPermissions.current()
-        local.skipPermissions.set(next)
+        const next = local.skipPermissions.toggle()
         toast.show({
           variant: next ? "warning" : "info",
           message: next ? t("tui.command.skip_permissions.toast_on") : t("tui.command.skip_permissions.toast_off"),
