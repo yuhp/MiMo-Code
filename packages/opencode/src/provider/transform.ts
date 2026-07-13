@@ -241,103 +241,6 @@ function supportsCacheMarkers(model: Provider.Model): boolean {
   return false
 }
 
-// Whether the provider/model accepts an "assistant prefill" — a trailing
-// assistant message that the model continues from. Anthropic-native genuinely
-// accepts it; the Bedrock Converse API rejects it with a non-retryable 400:
-// "This model does not support assistant message prefill. The conversation must
-// end with a user message."
-//
-// The trap (T35 follow-up recurrence): a Bedrock-backed model can be reached
-// through an Anthropic-messages gateway (e.g. mimorouter.llmcore.ai.srv
-// /v1/messages), where the model carries npm "@ai-sdk/anthropic" and a
-// providerID with no "bedrock" in it (xiaomi, mimo, a router alias). Detecting
-// Bedrock by npm/providerID name alone misses that case, so the prefill is sent
-// and 400s (error body: "Service: BedrockRuntime").
-//
-// The reliable runtime signal that survives the gateway is the model id itself:
-// Bedrock namespaces every hosted model as "<vendor>.<model>" (optionally with a
-// region/cross-region prefix, e.g. "anthropic.claude-3-5-sonnet",
-// "us.anthropic.claude-opus-4"). Anthropic-native / Vertex ids never carry that
-// dotted-vendor prefix ("claude-3-5-sonnet-20241022", "claude-sonnet-4@..."), so
-// matching it flags a Bedrock backend regardless of the front door without
-// touching genuine Anthropic.
-function supportsAssistantPrefill(model: Provider.Model): boolean {
-  // Bedrock Converse API rejects a trailing assistant message across all model
-  // families it hosts.
-  if (model.api.npm === "@ai-sdk/amazon-bedrock") return false
-  if (model.providerID.includes("bedrock")) return false
-  // Bedrock-backed model reached via a non-bedrock gateway: detect by the
-  // Bedrock model-id namespace (dotted-vendor prefix), which the gateway passes
-  // through even when npm/providerID say "anthropic".
-  if (isBedrockModelId(model.api.id) || isBedrockModelId(model.id)) return false
-  return true
-}
-
-// Bedrock model ids namespace the vendor before the model with a dot, optionally
-// behind a cross-region routing prefix: "anthropic.claude-3-5-sonnet",
-// "us.anthropic.claude-opus-4-6", "eu.meta.llama3-70b". Anthropic-native ids use
-// a bare "claude-*" / date / "@version" form with no such vendor.model segment.
-//
-// Known tradeoff: a non-Bedrock provider that also exposes a dotted vendor id
-// (e.g. a native Mistral endpoint serving "mistral.large") would false-positive
-// here and get its trailing assistant prefill dropped. We deliberately do NOT
-// gate this on providerID/npm being Bedrock — the whole reason this check exists
-// is the gateway case where a Bedrock backend is reached under a clean alias
-// ("anthropic" providerID), which such a gate would miss again. The false
-// positive is low-impact (one dropped prefill, not an error) and is the safer
-// side to err on, since sending a prefill to a real Bedrock backend hard-400s.
-// The reactive error-body retry in session/llm.ts backs both directions: it
-// re-sends pruned only on the actual prefill-rejection 400, so a genuine miss
-// self-heals without relying on this id heuristic being perfect.
-function isBedrockModelId(id: string): boolean {
-  return /(^|[./])(anthropic|meta|amazon|cohere|mistral|ai21|deepseek)\.[a-z0-9]/i.test(id)
-}
-
-// Bedrock (and any other prefill-rejecting provider) 400s when the message list
-// ends with an assistant message. This drops trailing assistant message(s) so
-// the sent conversation ends with a user/tool message, matching the provider's
-// requirement. Anthropic-native and every other provider keep prefill intact
-// (supportsAssistantPrefill gates the call in `message()`).
-//
-// Runs at the pre-send choke point, so it also self-heals history that already
-// ends in an assistant turn (e.g. a retry after an interrupted generation).
-//
-// Exported so the reactive error-body retry in session/llm.ts can prune and
-// re-send when a gateway that name-matching missed rejects the prefill at 400.
-export function dropTrailingAssistantPrefill(msgs: ModelMessage[]): ModelMessage[] {
-  let end = msgs.length
-  while (end > 0 && msgs[end - 1].role === "assistant") end--
-  if (end === msgs.length) return msgs
-  return msgs.slice(0, end)
-}
-
-// Signature of the non-retryable 400 a Bedrock Converse backend returns when the
-// conversation ends with an assistant (prefill) message — including when reached
-// through an Anthropic-messages gateway that exposes a clean model alias, so
-// supportsAssistantPrefill's id/providerID matching never flags it and the
-// prefill is sent anyway. The error body reads:
-//   "This model does not support assistant message prefill. The conversation
-//    must end with a user message." (Service: BedrockRuntime)
-// Matching the deterministic failure text is provider-agnostic: it works
-// regardless of gateway naming, providerID, or model-id namespace. We inspect
-// both the error message and the raw response body, case-insensitively, and key
-// only on the specific prefill-rejection phrase — not all 400s.
-const ASSISTANT_PREFILL_REJECTION = /does not support assistant message prefill|must end with a user message/i
-
-export function isAssistantPrefillRejection(error: unknown): boolean {
-  if (!error || typeof error !== "object") return false
-  const e = error as { message?: unknown; responseBody?: unknown; statusCode?: unknown }
-  const status = typeof e.statusCode === "string" ? Number.parseInt(e.statusCode, 10) : e.statusCode
-  // The prefill rejection is always a 400; require it so an unrelated error that
-  // happens to echo the phrase (e.g. our own log line) can't trigger a reprune.
-  if (typeof status === "number" && !Number.isNaN(status) && status !== 400) return false
-  const haystack = [
-    typeof e.message === "string" ? e.message : "",
-    typeof e.responseBody === "string" ? e.responseBody : "",
-  ].join("\n")
-  return ASSISTANT_PREFILL_REJECTION.test(haystack)
-}
-
 // The cache-control marker shape differs per provider/SDK. This is the single
 // source of truth, keyed by the SDK provider-options namespace. `applyCaching`
 // attaches the whole object (keyed by stored providerID) and lets `message()`
@@ -682,9 +585,6 @@ export function message(msgs: ModelMessage[], model: Provider.Model, options: Re
   msgs = unsupportedParts(msgs, model)
   msgs = limitImages(msgs, model)
   msgs = normalizeMessages(msgs, model, options)
-  if (!supportsAssistantPrefill(model)) {
-    msgs = dropTrailingAssistantPrefill(msgs)
-  }
   if (supportsCacheMarkers(model)) {
     msgs = applyCaching(msgs, model)
   }

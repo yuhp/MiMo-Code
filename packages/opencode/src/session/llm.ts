@@ -1,7 +1,7 @@
 import path from "path"
 import { Provider } from "@/provider"
 import { Log } from "@/util"
-import { Context, Duration, Effect, Layer, Record, Schedule, Ref, Cause } from "effect"
+import { Context, Duration, Effect, Layer, Record, Schedule, Ref } from "effect"
 import * as Stream from "effect/Stream"
 import { streamText, wrapLanguageModel, type ModelMessage, type Tool, tool, jsonSchema } from "ai"
 import { mergeDeep, pipe } from "remeda"
@@ -198,10 +198,6 @@ export type StreamInput = {
 
 export type StreamRequest = StreamInput & {
   abort: AbortSignal
-  // Set on the reactive one-shot retry after a Bedrock/gateway prefill-rejection
-  // 400: prune trailing assistant (prefill) message(s) before building the
-  // request so the resend ends with a user/tool message. See stream().
-  dropAssistantPrefill?: boolean
 }
 
 export type Event = Result["fullStream"] extends AsyncIterable<infer T> ? T : never
@@ -364,20 +360,10 @@ const live: Layer.Layer<
       }
 
       const isWorkflow = language instanceof GitLabWorkflowLanguageModel
-      // Reactive prefill-rejection recovery: a Bedrock-backed model reached via
-      // an Anthropic-messages gateway can 400 on a trailing assistant (prefill)
-      // message that ProviderTransform.supportsAssistantPrefill failed to detect
-      // (clean alias id, non-bedrock providerID). On that specific 400 the stream
-      // re-runs with this flag set; drop the trailing assistant turn(s) so the
-      // resend ends with a user/tool message. The proactive transform still owns
-      // known-bedrock providers — this is only the safety net they miss.
-      const requestMessages = input.dropAssistantPrefill
-        ? ProviderTransform.dropTrailingAssistantPrefill(input.messages)
-        : input.messages
       const messages = isOpenaiOauth
-        ? requestMessages
+        ? input.messages
         : isWorkflow
-          ? requestMessages
+          ? input.messages
           : [
               ...system.map(
                 (x): ModelMessage => ({
@@ -385,7 +371,7 @@ const live: Layer.Layer<
                   content: x,
                 }),
               ),
-              ...requestMessages,
+              ...input.messages,
             ]
 
       const params = yield* plugin.trigger(
@@ -663,112 +649,60 @@ const live: Layer.Layer<
       })
     })
 
-    const stream: Interface["stream"] = (input) => {
-      // Build the scoped stream for one attempt. `dropAssistantPrefill` forces
-      // run() to prune the trailing assistant prefill before send — used only by
-      // the reactive one-shot retry below.
-      const attempt = (dropAssistantPrefill: boolean) =>
-        Stream.scoped(
-          Stream.unwrap(
-            Effect.gen(function* () {
-              const ctrl = yield* Effect.acquireRelease(
-                Effect.sync(() => new AbortController()),
-                (ctrl) => Effect.sync(() => ctrl.abort()),
-              )
-              const attemptRef = yield* Ref.make(0)
+    const stream: Interface["stream"] = (input) =>
+      Stream.scoped(
+        Stream.unwrap(
+          Effect.gen(function* () {
+            const ctrl = yield* Effect.acquireRelease(
+              Effect.sync(() => new AbortController()),
+              (ctrl) => Effect.sync(() => ctrl.abort()),
+            )
+            const attemptRef = yield* Ref.make(0)
 
-              const publishRetryEvent = (error: unknown, nextAttempt: number) =>
-                Effect.gen(function* () {
-                  log.debug("retry attempt", {
-                    sessionID: input.sessionID,
+            const publishRetryEvent = (error: unknown, nextAttempt: number) =>
+              Effect.gen(function* () {
+                log.debug("retry attempt", {
+                  sessionID: input.sessionID,
+                  messageID: input.user.id,
+                  attempt: nextAttempt,
+                  reason: error instanceof Error ? error.message : String(error),
+                })
+                if (nextAttempt > 10) return
+                const delayMs = Math.min(500 * 2 ** (nextAttempt - 1), 300_000)
+                yield* Effect.promise(() =>
+                  Bus.publish(Session.Event.RetryAttempt, {
+                    sessionID: SessionID.make(input.sessionID),
                     messageID: input.user.id,
                     attempt: nextAttempt,
+                    maxAttempts: 10,
                     reason: error instanceof Error ? error.message : String(error),
+                    nextDelayMs: delayMs,
                   })
-                  if (nextAttempt > 10) return
-                  const delayMs = Math.min(500 * 2 ** (nextAttempt - 1), 300_000)
-                  yield* Effect.promise(() =>
-                    Bus.publish(Session.Event.RetryAttempt, {
-                      sessionID: SessionID.make(input.sessionID),
-                      messageID: input.user.id,
-                      attempt: nextAttempt,
-                      maxAttempts: 10,
-                      reason: error instanceof Error ? error.message : String(error),
-                      nextDelayMs: delayMs,
-                    })
-                  )
-                })
+                )
+              })
 
-              const streamWithTelemetry = run({ ...input, abort: ctrl.signal, dropAssistantPrefill }).pipe(
-                Effect.tapError((error) => {
-                  if (!isTransientCapacityError(error)) return Effect.void
-                  return Ref.updateAndGet(attemptRef, (n) => n + 1).pipe(
-                    Effect.flatMap((nextAttempt) => publishRetryEvent(error, nextAttempt))
-                  )
-                })
-              )
+            const streamWithTelemetry = run({ ...input, abort: ctrl.signal }).pipe(
+              Effect.tapError((error) => {
+                if (!isTransientCapacityError(error)) return Effect.void
+                return Ref.updateAndGet(attemptRef, (n) => n + 1).pipe(
+                  Effect.flatMap((nextAttempt) => publishRetryEvent(error, nextAttempt))
+                )
+              })
+            )
 
-              const result = yield* streamWithTelemetry.pipe(
-                Effect.retry({
-                  while: isTransientCapacityError,
-                  schedule: persistentRetrySchedule,
-                }),
-              )
+            const result = yield* streamWithTelemetry.pipe(
+              Effect.retry({
+                while: isTransientCapacityError,
+                schedule: persistentRetrySchedule,
+              }),
+            )
 
-              // Structurally identical to the pre-#1679 stream: a bare scoped
-              // stream over the provider's fullStream. No per-event combinator,
-              // no extra catch layer — so the normal (non-error) event flow and
-              // the AbortController scope teardown are exactly as before. The
-              // reactive prefill retry is layered lazily below and only pays a
-              // cost when an actual error surfaces.
-              return Stream.fromAsyncIterable(result.fullStream, (e) =>
-                e instanceof Error ? e : new Error(String(e)),
-              )
-            }),
-          ),
-        )
-
-      // Promote the Bedrock/gateway prefill-rejection 400 — which arrives as an
-      // in-band `{ type: "error", error }` event, not a stream fault — into a
-      // stream FAILURE so the reactive retry can catch it. `Stream.flatMap`
-      // short-circuits every non-matching event straight through with a pure
-      // `Stream.succeed` (no per-event Effect fiber, unlike `Stream.mapEffect`),
-      // and the failing branch is only ever constructed for the specific error
-      // event. On a clean stream this is a transparent passthrough.
-      const promotePrefillRejection = (stream: Stream.Stream<Event, Error, never>) =>
-        stream.pipe(
-          Stream.flatMap((event) =>
-            event.type === "error" && ProviderTransform.isAssistantPrefillRejection(event.error)
-              ? Stream.fail(event.error instanceof Error ? event.error : new Error(String(event.error)))
-              : Stream.succeed(event),
-          ),
-        )
-
-      // Reactive prefill-rejection recovery. The proactive transform drops the
-      // trailing assistant prefill for providers we can identify as Bedrock, but
-      // a Bedrock backend fronted by an Anthropic-messages gateway under a clean
-      // alias (providerID "anthropic", bare id "claude-*") slips past that
-      // detection and 400s with "does not support assistant message prefill".
-      // Keying off that deterministic error body — not the model id — we retry
-      // exactly ONCE with the prefill pruned. Guarded to a single reprune so a
-      // persistent failure surfaces the retry's OWN error, falling back to the
-      // original prefill cause only when the resend is again prefill-rejected.
-      return promotePrefillRejection(attempt(false)).pipe(
-        Stream.catchCause((primaryCause) => {
-          if (!ProviderTransform.isAssistantPrefillRejection(Cause.squash(primaryCause)))
-            return Stream.failCause(primaryCause)
-          // Pruned resend passes events through untouched: any residual error
-          // flows to the processor and surfaces normally (no promotion, no loop).
-          return attempt(true).pipe(
-            Stream.catchCause((retryCause) =>
-              ProviderTransform.isAssistantPrefillRejection(Cause.squash(retryCause))
-                ? Stream.failCause(primaryCause)
-                : Stream.failCause(retryCause),
-            ),
-          )
-        }),
+            return Stream.fromAsyncIterable(result.fullStream, (e) =>
+              e instanceof Error ? e : new Error(String(e)),
+            )
+          }),
+        ),
       )
-    }
 
     return Service.of({ stream, buildSystemArray })
   }),
