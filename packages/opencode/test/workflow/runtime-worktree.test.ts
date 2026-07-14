@@ -1,6 +1,6 @@
 import { $ } from "bun"
 import { describe, expect, afterEach } from "bun:test"
-import { Effect } from "effect"
+import { Deferred, Effect } from "effect"
 import * as fsp from "fs/promises"
 import * as path from "path"
 import { Session } from "../../src/session"
@@ -170,7 +170,11 @@ describe("WorkflowRuntime worktree isolation", () => {
           title: "wf isolate cancel",
           permission: [{ permission: "*", pattern: "*", action: "allow" }],
         })
-        yield* llm.hang // the isolated agent hangs so it is in-flight at cancel time
+        // Controllable hang: agent parks on a Deferred, not Stream.never.
+        // Fiber.interrupt unwinds Deferred.await at the Effect level (no TCP
+        // cleanup), so cancel is fast and deterministic under any load.
+        const release = yield* Deferred.make<void>()
+        yield* llm.hangUntil(release)
         yield* Effect.promise(() => $`git add -A && git commit -q -m wf-config`.cwd(dir).quiet().nothrow())
         const script = [
           `export const meta = { name: "t", description: "d" }`,
@@ -178,13 +182,9 @@ describe("WorkflowRuntime worktree isolation", () => {
         ].join("\n")
         const { runID } = yield* runtime.start({ script, sessionID: parent.id, parentActorID: "main", model: ref })
         yield* Effect.sleep("600 millis") // let the worktree get created + agent spawn
-        // The in-flight worktree dir is not surfaced to the test (the agent hung
-        // before returning an envelope), so a deterministic filesystem assertion is
-        // not available. The reliable guard is that cancel COMPLETES without throwing
-        // (it now calls worktree.remove for the in-flight worktree, best-effort) and
-        // the run lands cancelled — a regression where cancel throws on worktree
-        // removal would fail right here.
         yield* runtime.cancel({ runID })
+        // Release the hang so the agent unwinds cleanly (no leaked fiber).
+        yield* Deferred.succeed(release, undefined)
         const s = yield* runtime.status({ runID })
         expect(s.status).toBe("cancelled")
       }),
