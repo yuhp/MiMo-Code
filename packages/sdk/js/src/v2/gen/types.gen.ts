@@ -236,6 +236,19 @@ export type EventMetricsAgentRequest = {
   }
 }
 
+export type EventMetricsTryBestDetected = {
+  type: "metrics.try_best_detected"
+  properties: {
+    sessionID: string
+    reason: "edit_repeat" | "bash_retry" | "action_streak"
+    provider: string
+    model_id: string
+    count: number
+    similarity?: number
+    action?: "edit" | "verify"
+  }
+}
+
 export type EventTeamCreated = {
   type: "team.created"
   properties: {
@@ -572,6 +585,25 @@ export type EventSessionRetryAttempt = {
     maxAttempts: number
     reason: string
     nextDelayMs: number
+  }
+}
+
+export type EventSessionTryBestDetected = {
+  type: "session.try_best.detected"
+  properties: {
+    sessionID: string
+    agentID?: string
+    providerID: string
+    modelID: string
+    reason: "edit_repeat" | "bash_retry" | "action_streak"
+    evidence: {
+      tool: string
+      path?: string
+      command?: string
+      count: number
+      similarity?: number
+      action?: "edit" | "verify"
+    }
   }
 }
 
@@ -1540,6 +1572,7 @@ export type GlobalEvent = {
     | EventMetricsModelCall
     | EventMetricsToolCall
     | EventMetricsAgentRequest
+    | EventMetricsTryBestDetected
     | EventTeamCreated
     | EventTeamMemberJoined
     | EventWorkflowPhase
@@ -1562,6 +1595,7 @@ export type GlobalEvent = {
     | EventSessionDiff
     | EventSessionError
     | EventSessionRetryAttempt
+    | EventSessionTryBestDetected
     | EventHookExecuted
     | EventHookReactReentered
     | EventHookReactMaxReached
@@ -2310,6 +2344,27 @@ export type Config = {
      */
     continue_loop_on_deny?: boolean
     /**
+     * Try-best loop detector thresholds.
+     */
+    try_best?: {
+      /**
+       * Recent edit events to compare (default 12).
+       */
+      edit_window?: number
+      /**
+       * Jaccard threshold for near-identical edit detection (default 0.8).
+       */
+      edit_similarity?: number
+      /**
+       * Prior similar edits required before pausing (default 2).
+       */
+      edit_matches?: number
+      /**
+       * Consecutive edit or verify actions without progress before pausing (default 4).
+       */
+      action_streak?: number
+    }
+    /**
      * Timeout in milliseconds for model context protocol (MCP) requests
      */
     mcp_timeout?: number
@@ -2734,6 +2789,7 @@ export type Event =
   | EventMetricsModelCall
   | EventMetricsToolCall
   | EventMetricsAgentRequest
+  | EventMetricsTryBestDetected
   | EventTeamCreated
   | EventTeamMemberJoined
   | EventWorkflowPhase
@@ -2756,6 +2812,7 @@ export type Event =
   | EventSessionDiff
   | EventSessionError
   | EventSessionRetryAttempt
+  | EventSessionTryBestDetected
   | EventHookExecuted
   | EventHookReactReentered
   | EventHookReactMaxReached

@@ -3485,6 +3485,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 if (yield* handleTextRepeat({ lastUser })) return "continue" as const
                 return "break" as const
               }
+              if (result === "stop") return "break" as const
 
               if (structured !== undefined) {
                 handle.message.structured = structured
@@ -3539,7 +3540,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
               if (forkClassification.type === "final" && forkClassification.degraded)
                 yield* slog.warn("degraded final on abnormal finish", { finish: handle.message.finish })
-              if (result === "stop") return "break" as const
               // Fork agents are always subagents (lastUser.agentID is set); use
               // per-actor compaction on overflow (same as non-fork subagent path).
               if (!isBoundedComputation && result === "overflow") {
@@ -3711,6 +3711,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               if (yield* handleTextRepeat({ lastUser })) return "continue" as const
               return "break" as const
             }
+            if (result === "stop") return "break" as const
 
             if (structured !== undefined) {
               handle.message.structured = structured
@@ -3763,7 +3764,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
             if (classification.type === "final" && classification.degraded)
               yield* slog.warn("degraded final on abnormal finish", { finish: handle.message.finish })
-            if (result === "stop") return "break" as const
             if (!isBoundedComputation && result === "overflow") {
               // Subagent overflow → per-actor compaction. Insert a boundary
               // tagged with the subagent's agent_id; the next runLoop iteration
