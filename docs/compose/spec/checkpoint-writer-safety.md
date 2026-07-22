@@ -1,14 +1,28 @@
 ---
 feature: checkpoint-writer-safety
-status: in-progress
+status: delivered
 updated: 2026-07-22
 branch: investigate/checkpoint-writer-sandbox
-commits:
+commits: 0cb81dba827e27549bde6fba794e27509ef1bf65..25f175dd
 ---
 
 # Checkpoint Writer Safety
 
 ## Report
+
+**What was built** - The checkpoint writer is now confined to normal paths under the memory tree at the unified write gate; the existing precise memory allowlist remains authoritative inside that tree. Dream/distill retain their prior memory-or-`.mimocode/` behavior, while ordinary agents retain normal source writes. The gate now obtains its worktree from `InstanceState.context`, so InstanceRef-bound actor fibers cannot skip the sandbox.
+
+Invalid-output recovery now selects an explicit role policy. Primary turns keep the user-facing reminder, ordinary actors receive a parent-facing reminder, and checkpoint writers receive a scoped recovery instruction that either finishes authorized memory edits or returns `CHECKPOINT_COMPLETE`. System-agent policy coverage is exhaustive. Terminal assistant errors now fail actor outcomes, so exhausted checkpoint recovery leaves the watermark unchanged through the existing transactional settlement path.
+
+**Verification** - From `packages/opencode`, `bun test test/tool/memory-path-guard.test.ts test/tool/apply_patch.test.ts test/agent/ask-routing.test.ts test/session/invalid-output-continuation.test.ts test/actor/spawn.test.ts test/session/checkpoint-watermark-transactional.test.ts test/session/checkpoint-child-session.test.ts test/session/checkpoint-permission.test.ts` passed 151 tests with 286 assertions and 0 failures. `bun typecheck` passed. `git diff --check` passed. Targeted oxlint reported 0 errors; remaining warnings were existing large-file/test idioms. Independent final review approved spec compliance, correctness, and codebase consistency with no remaining findings.
+
+**Journey log**
+
+- The incident was one writer reactivated by the generic user-facing empty-output reminder, not duplicate checkpoint-writer spawns.
+- The unified memory guard was precise only after a path entered the memory tree; a separate checkpoint-writer memory-only sandbox was required for source paths.
+- `SessionPrompt.prompt` could return a terminal assistant error that Actor previously converted to success; propagating that error restores watermark transactionality.
+- A combined AppRuntime watermark E2E was process-state dependent, so stable boundary tests cover checkpoint exhaustion → actor failure and writer failure → unchanged watermark separately.
+- Symlink/hardlink topology inside the application-managed memory tree is explicitly user-owned and outside this lexical path-boundary threat model.
 
 ## [S1] Problem
 
@@ -90,8 +104,8 @@ Tests must cover the real boundaries rather than prompt text alone:
 
 ## Tasks
 
-- [ ] T1: Enforce the checkpoint-writer memory-only sandbox in the unified write gate - acceptance: checkpoint-writer source and `.mimocode/` targets are rejected while valid memory targets, dream/distill behavior, and normal-agent source writes pass (covers: S2.1, S2.5)
-- [ ] T2: Add centralized role-specific invalid-output policy selection and checkpoint completion-marker retry - acceptance: primary, ordinary actor, checkpoint-writer, dream, and distill receive their specified prompts, the checkpoint path converges on `CHECKPOINT_COMPLETE`, and system-agent policy coverage is exhaustive (covers: S2.2, S2.3, S2.5)
-- [ ] T3: Propagate terminal assistant errors as actor failures - acceptance: an actor whose prompt terminates with `assistant.error` resolves failure, while successful text and structured actor results remain successful (covers: S2.4, S2.5)
-- [ ] T4: Add apply-patch and checkpoint outcome regressions - acceptance: checkpoint-writer `apply_patch` cannot mutate source, valid checkpoint and project-memory mutations succeed, exhausted checkpoint recovery resolves actor failure, failed writer settlement leaves the watermark unchanged, and primary recovery remains unchanged (covers: S2.1, S2.3, S2.4, S2.5; depends: T1, T2, T3)
-- [ ] T5: Run focused tests and package typecheck, then obtain independent review - acceptance: all focused suites and `bun typecheck` pass from `packages/opencode`, and review confirms write-boundary, retry-policy, actor-outcome, and scope compliance (covers: S2.1, S2.2, S2.3, S2.4, S2.5; depends: T4)
+- [x] T1: Enforce the checkpoint-writer memory-only sandbox in the unified write gate - acceptance: checkpoint-writer source and `.mimocode/` targets are rejected while valid memory targets, dream/distill behavior, and normal-agent source writes pass (covers: S2.1, S2.5)
+- [x] T2: Add centralized role-specific invalid-output policy selection and checkpoint completion-marker retry - acceptance: primary, ordinary actor, checkpoint-writer, dream, and distill receive their specified prompts, the checkpoint path converges on `CHECKPOINT_COMPLETE`, and system-agent policy coverage is exhaustive (covers: S2.2, S2.3, S2.5)
+- [x] T3: Propagate terminal assistant errors as actor failures - acceptance: an actor whose prompt terminates with `assistant.error` resolves failure, while successful text and structured actor results remain successful (covers: S2.4, S2.5)
+- [x] T4: Add apply-patch and checkpoint outcome regressions - acceptance: checkpoint-writer `apply_patch` cannot mutate source, valid checkpoint and project-memory mutations succeed, exhausted checkpoint recovery resolves actor failure, failed writer settlement leaves the watermark unchanged, and primary recovery remains unchanged (covers: S2.1, S2.3, S2.4, S2.5; depends: T1, T2, T3)
+- [x] T5: Run focused tests and package typecheck, then obtain independent review - acceptance: all focused suites and `bun typecheck` pass from `packages/opencode`, and review confirms write-boundary, retry-policy, actor-outcome, and scope compliance (covers: S2.1, S2.2, S2.3, S2.4, S2.5; depends: T4)
